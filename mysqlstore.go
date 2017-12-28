@@ -266,7 +266,7 @@ func (m *MySQLStore) save(session *sessions.Session) error {
 	return nil
 }
 
-func (m *MySQLStore) load(session *sessions.Session) error {
+func (m *MySQLStore) load(session *sessions.Session) (err error) {
 	row := m.stmtSelect.QueryRow(session.ID)
 	sess := sessionRow{}
 	scanErr := row.Scan(&sess.id, &sess.data, &sess.createdOn, &sess.modifiedOn, &sess.expiresOn)
@@ -275,15 +275,15 @@ func (m *MySQLStore) load(session *sessions.Session) error {
 	}
 	if sess.expiresOn.Sub(time.Now()) < 0 {
 		log.Printf("Session expired on %s, but it is %s now.", sess.expiresOn, time.Now())
-		return errors.New("Session expired")
+		err = errors.New("Session expired")
 	}
-	err := securecookie.DecodeMulti(session.Name(), sess.data, &session.Values, m.Codecs...)
-	if err != nil {
-		return err
+	errDecode := securecookie.DecodeMulti(session.Name(), sess.data, &session.Values, m.Codecs...)
+	if errDecode != nil {
+		return errDecode
 	}
 	session.Values["created_on"] = sess.createdOn
 	session.Values["modified_on"] = sess.modifiedOn
 	session.Values["expires_on"] = sess.expiresOn
-	return nil
+	return
 
 }
