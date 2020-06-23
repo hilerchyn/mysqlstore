@@ -21,11 +21,13 @@ import (
 )
 
 type MySQLStore struct {
-	db         *sql.DB
-	stmtInsert *sql.Stmt
-	stmtDelete *sql.Stmt
-	stmtUpdate *sql.Stmt
-	stmtSelect *sql.Stmt
+	db                *sql.DB
+	stmtInsert        *sql.Stmt
+	stmtDelete        *sql.Stmt
+	stmtUpdate        *sql.Stmt
+	stmtSelect        *sql.Stmt
+	stmtUpdateUid     *sql.Stmt
+	stmtDeleteExpired *sql.Stmt
 
 	Codecs  []securecookie.Codec
 	Options *sessions.Options
@@ -35,6 +37,7 @@ type MySQLStore struct {
 type sessionRow struct {
 	id         string
 	data       string
+	uid        int64
 	createdOn  time.Time
 	modifiedOn time.Time
 	expiresOn  time.Time
@@ -62,7 +65,7 @@ func NewMySQLStoreFromConnection(db *sql.DB, tableName string, path string, maxA
 		"session_data LONGBLOB, " +
 		"created_on TIMESTAMP DEFAULT NOW(), " +
 		"modified_on TIMESTAMP NOT NULL DEFAULT NOW() ON UPDATE CURRENT_TIMESTAMP, " +
-		"expires_on TIMESTAMP DEFAULT NOW(), PRIMARY KEY(`id`)) ENGINE=InnoDB;"
+		"expires_on TIMESTAMP DEFAULT NOW(), `uid` bigint(11) unsigned DEFAULT '0', PRIMARY KEY(`id`)) ENGINE=InnoDB;"
 	if _, err := db.Exec(cTableQ); err != nil {
 		switch err.(type) {
 		case *mysql.MySQLError:
@@ -97,7 +100,20 @@ func NewMySQLStoreFromConnection(db *sql.DB, tableName string, path string, maxA
 		return nil, stmtErr
 	}
 
-	selQ := "SELECT id, session_data, created_on, modified_on, expires_on from " +
+	updUIDQ := "UPDATE " + tableName + " SET uid= ? " +
+		"WHERE id = ?"
+	stmtUpdateUid, stmtErr := db.Prepare(updUIDQ)
+	if stmtErr != nil {
+		return nil, stmtErr
+	}
+
+	delExpQ := "DELETE FROM " + tableName + " WHERE expires_on <= ?"
+	stmtDeleteExpired, stmtErr := db.Prepare(delExpQ)
+	if stmtErr != nil {
+		return nil, stmtErr
+	}
+
+	selQ := "SELECT id, session_data, created_on, modified_on, expires_on, uid from " +
 		tableName + " WHERE id = ?"
 	stmtSelect, stmtErr := db.Prepare(selQ)
 	if stmtErr != nil {
@@ -105,12 +121,14 @@ func NewMySQLStoreFromConnection(db *sql.DB, tableName string, path string, maxA
 	}
 
 	return &MySQLStore{
-		db:         db,
-		stmtInsert: stmtInsert,
-		stmtDelete: stmtDelete,
-		stmtUpdate: stmtUpdate,
-		stmtSelect: stmtSelect,
-		Codecs:     securecookie.CodecsFromPairs(keyPairs...),
+		db:                db,
+		stmtInsert:        stmtInsert,
+		stmtDelete:        stmtDelete,
+		stmtUpdate:        stmtUpdate,
+		stmtSelect:        stmtSelect,
+		stmtUpdateUid:     stmtUpdateUid,
+		stmtDeleteExpired: stmtDeleteExpired,
+		Codecs:            securecookie.CodecsFromPairs(keyPairs...),
 		Options: &sessions.Options{
 			Path:   path,
 			MaxAge: maxAge,
@@ -124,6 +142,8 @@ func (m *MySQLStore) Close() {
 	m.stmtUpdate.Close()
 	m.stmtDelete.Close()
 	m.stmtInsert.Close()
+	m.stmtUpdateUid.Close()
+	m.stmtDeleteExpired.Close()
 	m.db.Close()
 }
 
@@ -269,7 +289,7 @@ func (m *MySQLStore) save(session *sessions.Session) error {
 func (m *MySQLStore) load(session *sessions.Session) (err error) {
 	row := m.stmtSelect.QueryRow(session.ID)
 	sess := sessionRow{}
-	scanErr := row.Scan(&sess.id, &sess.data, &sess.createdOn, &sess.modifiedOn, &sess.expiresOn)
+	scanErr := row.Scan(&sess.id, &sess.data, &sess.createdOn, &sess.modifiedOn, &sess.expiresOn, &sess.uid)
 	if scanErr != nil {
 		return scanErr
 	}
@@ -284,6 +304,24 @@ func (m *MySQLStore) load(session *sessions.Session) (err error) {
 	session.Values["created_on"] = sess.createdOn
 	session.Values["modified_on"] = sess.modifiedOn
 	session.Values["expires_on"] = sess.expiresOn
+	session.Values["uid"] = sess.uid
 	return
 
+}
+
+func (m *MySQLStore) UpdateUid(uid int64, session *sessions.Session) error {
+
+	_, updErr := m.stmtUpdateUid.Exec(uid, session.ID)
+	if updErr != nil {
+		return updErr
+	}
+	return nil
+}
+
+func (m *MySQLStore) DeleteExpiredSessions(stamp time.Time) error {
+	_, delErr := m.stmtDeleteExpired.Exec(stamp.Format("2006-01-02 15:04:05"))
+	if delErr != nil {
+		return delErr
+	}
+	return nil
 }
